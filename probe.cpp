@@ -1,133 +1,194 @@
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <elf.h>
 #include <fstream>
 #include <ios>
 #include <iostream>
 #include <filesystem>
 #include <map>
-
+#include <memory>
+#include <newTypes.hpp>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
-#define SHIFT_ARGS(arr, size) do {++arr; --size; } while (0)
+
+#define SHIFT_ARGS(size, arr) do {++arr; --size; } while (0)
+#define UNREACHABLE(msg) do { std::cerr << msg << std::endl; std::abort(); } while(0)
+
 using FPMap = std::map<std::string, fs::file_time_type>;
+
+static constexpr const Elf64_Half g_TotalSections = 3;
+static constexpr const Elf64_Off g_FileShOff = sizeof(Elf64_Ehdr) + (sizeof(Elf64_Shdr) * g_TotalSections);
+
+template <typename TP>
+auto to_sys_clock(TP tp)
+{
+    using namespace std::chrono;
+    return time_point_cast<system_clock::duration>(tp - TP::clock::now()
+              + system_clock::now());
+}
+
+template <typename TP>
+std::time_t to_time_t(TP tp)
+{
+    using namespace std::chrono;
+    auto sctp = to_sys_clock(tp);
+    return system_clock::to_time_t(sctp);
+}
 
 class FileIO
 {
+
 private:
+
     std::fstream m_File;
     fs::path m_FileName;
     std::streampos m_EndPos;
     std::streampos m_SavedPos;
+
 public:
-    FileIO(fs::path const& lFingerPrintFile)
-        : m_FileName(lFingerPrintFile)
+
+    FileIO(fs::path const& lFingerPrintFile);
+    ~FileIO();
+    void read(void *lData, size_t const& lSize);
+    bool eof();
+    void write(const void *lData, size_t const& lSize);
+    bool chkSzRead(size_t const& lSzToRd);
+    bool chkSzWrite(size_t const& lSzToRd);
+    void seekOffRead(std::streamoff const& lOffSz);
+    void seekOffWrite(std::streamoff const& lOffSz);
+    void seekAbsRead(std::streampos const& lStrmPos);
+    void seekAbsWrite(std::streampos const& lStrmPos);
+    void saveCtxRead();
+    void saveCtxWrite();
+    void gotoLastCtxRead();
+    void gotoLastCtxWrite();
+};
+
+FileIO::FileIO(fs::path const& lFingerPrintFile)
+    : m_FileName(lFingerPrintFile)
+{
+    m_File.open(lFingerPrintFile, std::ios::binary | std::ios::in | std::ios::out);
+    if (!m_File)
     {
+        m_File.open(lFingerPrintFile, std::ios::out);
+        if (!m_File)
+            throw std::runtime_error("Error in creating file:: " + lFingerPrintFile.string());
+        m_File.close();
+
         m_File.open(lFingerPrintFile, std::ios::binary | std::ios::in | std::ios::out);
         if (!m_File)
-        {
-            m_File.open(lFingerPrintFile, std::ios::out);
-            if (!m_File)
-                throw std::runtime_error("Error in creating file:: " + lFingerPrintFile.string());
-            m_File.close();
+            throw std::runtime_error("Error in opening file:: " + lFingerPrintFile.string());
+    }
 
-            m_File.open(lFingerPrintFile, std::ios::binary | std::ios::in | std::ios::out);
-            if (!m_File)
-                throw std::runtime_error("Error in opening file:: " + lFingerPrintFile.string());
-        }
+    m_File.seekg(0, std::ios::end);
+    m_EndPos = m_File.tellg();
+    m_File.seekg(0);
+}
 
-        m_File.seekg(0, std::ios::end);
-        m_EndPos = m_File.tellg();
-        m_File.seekg(0);
-    }
-    ~FileIO()
+FileIO::~FileIO()
+{
+    if (m_File.is_open())
     {
-        if (m_File.is_open())
-        {
-            m_File.close();
-        }
+        m_File.close();
     }
-    void read(void *lData, size_t const& lSize)
+}
+
+void FileIO::read(void *lData, size_t const& lSize)
+{
+    m_File.read(reinterpret_cast<char *>(lData), lSize);
+    if (!m_File)
     {
-        m_File.read(reinterpret_cast<char *>(lData), lSize);
-        if (!m_File)
-        {
-            throw std::runtime_error("Error in reading the file:: " + m_FileName.string());
-        }
+        throw std::runtime_error("Error in reading the file:: " + m_FileName.string());
     }
-    bool eof()
+}
+
+bool FileIO::eof()
+{
+    return m_File.eof() || (m_EndPos <= m_File.tellg());
+}
+
+void FileIO::write(const void *lData, size_t const& lSize)
+{
+    m_File.write(reinterpret_cast<const char *>(lData), lSize);
+    auto lCurPos = m_File.tellp();
+    if (lCurPos > m_EndPos)
     {
-        return m_File.eof() || (m_EndPos <= m_File.tellg());
+        m_EndPos = lCurPos;
     }
-    void write(const void *lData, size_t const& lSize)
-    {
-        m_File.write(reinterpret_cast<const char *>(lData), lSize);
-        auto lCurPos = m_File.tellp();
-        if (lCurPos > m_EndPos)
-        {
-            m_EndPos = lCurPos;
-        }
-    }
-    bool chkSzRead(size_t const& lSzToRd)
-    {
-        if (m_EndPos - m_File.tellg() >= lSzToRd)
-            return true;
-        return false;
-    }
-    bool chkSzWrite(size_t const& lSzToRd)
-    {
-        if (m_EndPos - m_File.tellp() >= lSzToRd)
-            return true;
-        return false;
-    }
-    void seekOffWrite(std::streamoff const& lOffSz)
-    {
-        if(chkSzWrite(lOffSz))
-            m_File.seekp(lOffSz, std::ios::cur);
-        else
-            m_File.seekp(0, std::ios::end);
-    }
-    void seekOffRead(std::streamoff const& lOffSz)
-    {
-        if(chkSzRead(lOffSz))
-            m_File.seekg(lOffSz, std::ios::cur);
-        else
-            throw std::runtime_error("Attempt to seek reading beyond EOF");
-    }
-    void seekWrite(std::streampos const& lStrmPos)
-    {
-        if(m_EndPos >= lStrmPos)
-            m_File.seekp(lStrmPos);
-        else
-            m_File.seekp(0, std::ios::end);
-    }
-    void saveCtxRead()
-    {
-        m_SavedPos = m_File.tellg();
-    }
-    void saveCtxWrite()
-    {
-        m_SavedPos = m_File.tellp();
-    }
-    void gotoLastCtxRead()
-    {
-        m_File.seekg(m_SavedPos);
-    }
-    void gotoLastCtxWrite()
-    {
-        m_File.seekp(m_SavedPos);
-    }
-    void seekRead(std::streampos const& lStrmPos)
-    {
-        if(m_EndPos >= lStrmPos)
-            m_File.seekg(lStrmPos);
-        else
-            throw std::runtime_error("Attempt to seek reading beyond EOF");
-    }
-};
+}
+
+bool FileIO::chkSzRead(size_t const& lSzToRd)
+{
+    if (m_EndPos - m_File.tellg() >= lSzToRd)
+        return true;
+    return false;
+}
+
+bool FileIO::chkSzWrite(size_t const& lSzToRd)
+{
+    if (m_EndPos - m_File.tellp() >= lSzToRd)
+        return true;
+    return false;
+}
+
+void FileIO::seekOffRead(std::streamoff const& lOffSz)
+{
+    if(chkSzRead(lOffSz))
+        m_File.seekg(lOffSz, std::ios::cur);
+    else
+        throw std::runtime_error("Attempt to seek reading beyond EOF");
+}
+
+void FileIO::seekOffWrite(std::streamoff const& lOffSz)
+{
+    if(chkSzWrite(lOffSz))
+        m_File.seekp(lOffSz, std::ios::cur);
+    else
+        m_File.seekp(0, std::ios::end);
+}
+
+void FileIO::seekAbsRead(std::streampos const& lStrmPos)
+{
+    if(m_EndPos >= lStrmPos)
+        m_File.seekg(lStrmPos);
+    else
+        throw std::runtime_error("Attempt to seek reading beyond EOF");
+}
+
+void FileIO::seekAbsWrite(std::streampos const& lStrmPos)
+{
+    if(m_EndPos >= lStrmPos)
+        m_File.seekp(lStrmPos);
+    else
+        m_File.seekp(0, std::ios::end);
+}
+
+void FileIO::saveCtxRead()
+{
+    m_SavedPos = m_File.tellg();
+}
+
+void FileIO::saveCtxWrite()
+{
+    m_SavedPos = m_File.tellp();
+}
+
+void FileIO::gotoLastCtxRead()
+{
+    m_File.seekg(m_SavedPos);
+}
+
+void FileIO::gotoLastCtxWrite()
+{
+    m_File.seekp(m_SavedPos);
+}
 
 namespace sd
 {
-    constexpr auto strlen(const char* lString) -> uint32_t
+    constexpr u32 strlen(const char* lString)
     {
         const char* lStr = lString;
         while(*lStr != '\0')
@@ -136,9 +197,22 @@ namespace sd
         }
         return (lStr - lString);
     }
+
+    constexpr const char *strrchr(const char *lStart, size_t lStrSize, char lCharToMatch)
+    {
+        const char *lStrEnd = lStart + lStrSize;
+        while (--lStrEnd >= lStart)
+        {
+            if (*lStrEnd == lCharToMatch)
+            {
+                return lStrEnd + 1; // Return pointer to character after the match
+            }
+        }
+        return lStart; // If no match found, return start of the string
+    }
 }
 
-auto crtElfHdr(const Elf64_Half lTotalSections) -> Elf64_Ehdr
+Elf64_Ehdr crtElfHdr(const Elf64_Half lTotalSections)
 {
     Elf64_Ehdr lElfHdr = {
         .e_ident = {
@@ -171,68 +245,14 @@ auto crtElfHdr(const Elf64_Half lTotalSections) -> Elf64_Ehdr
     return lElfHdr;
 }
 
-FPMap ReadElf(fs::path const& lFingerPrintFile)
-{
-    FPMap lSecHdrReader;
-    FileIO lFileIOStrm(lFingerPrintFile);
-
-    try
-    {
-        // Read
-        Elf64_Ehdr lElfHdrRead;
-        if(lFileIOStrm.chkSzRead(sizeof lElfHdrRead))
-            lFileIOStrm.read(&lElfHdrRead, sizeof lElfHdrRead);
-        else
-            throw std::runtime_error("Exceeded size of File while reading Hdr");
-
-        auto lSzOfShHdr = lElfHdrRead.e_shentsize;
-        auto lTotalSectionsRead = lElfHdrRead.e_shnum;
-
-        lFileIOStrm.seekOffRead(lSzOfShHdr * (lTotalSectionsRead - 1));
-
-        Elf64_Shdr lSecHdr;
-        lFileIOStrm.read(&lSecHdr, sizeof lSecHdr);
-
-        if(lSecHdr.sh_name > 1) // Not The NULL ShHdr or String Table
-        {
-            lFileIOStrm.seekRead(lSecHdr.sh_offset);
-            std::unique_ptr<char[]> lBuffer = std::make_unique<char[]>(lSecHdr.sh_size);
-            lFileIOStrm.read(lBuffer.get(), lSecHdr.sh_size);
-
-            size_t lFileNameStrSz = 0;
-            while(lFileNameStrSz + sizeof(fs::file_time_type) <= lSecHdr.sh_size)
-            {
-                auto const lBufStrLen = sd::strlen(lBuffer.get() + lFileNameStrSz);
-
-                auto &lFileMTime = lSecHdrReader[std::string(lBuffer.get() + lFileNameStrSz, lBufStrLen)];
-                lFileNameStrSz += lBufStrLen + 1;
-                std::memcpy(&lFileMTime, lBuffer.get() + lFileNameStrSz, sizeof(fs::file_time_type));
-
-                lFileNameStrSz += sizeof(fs::file_time_type);
-            }
-        }
-    }
-    catch(std::exception const& lExcuse)
-    {
-        std::cerr << lExcuse.what() << std::endl;
-    }
-
-    return lSecHdrReader;
-}
-
 void crtElf(fs::path const& lFingerPrintFile, FPMap const& lCompMap)
 {
-    FileIO lFileIOStrm(lFingerPrintFile);
-
     try
     {
         // Write
+        Elf64_Ehdr lElfHdr = crtElfHdr(g_TotalSections);
+
         const char lSectionName[] = "\0.String.Table\0.Siddharth.Header";
-
-        constexpr const Elf64_Half lTotalSectionsWrite = 3;
-        Elf64_Ehdr lElfHdrWrite = crtElfHdr(lTotalSectionsWrite);
-        constexpr const Elf64_Off lFileShOff = sizeof(Elf64_Ehdr) + (sizeof(Elf64_Shdr) * lTotalSectionsWrite);
-
         Elf64_Xword lTotFileSz = 0u, lTotLastAcc = 0u;
         for(const auto &[lFile, lAccTime] : lCompMap)
         {
@@ -240,13 +260,13 @@ void crtElf(fs::path const& lFingerPrintFile, FPMap const& lCompMap)
             lTotLastAcc += sizeof lAccTime;
         }
 
-        Elf64_Shdr lSecHdrWrite[lTotalSectionsWrite] = {
+        Elf64_Shdr lSecHdr[g_TotalSections] = {
             Elf64_Shdr{0},
             Elf64_Shdr{.sh_name      = 1,
                        .sh_type      = SHT_STRTAB,
                        .sh_flags     = SHF_STRINGS,
                        .sh_addr      = 0x00U,
-                       .sh_offset    = lFileShOff,
+                       .sh_offset    = g_FileShOff,
                        .sh_size      = sizeof lSectionName,
                        .sh_link      = SHN_UNDEF,
                        .sh_info      = 0x00U,
@@ -256,7 +276,7 @@ void crtElf(fs::path const& lFingerPrintFile, FPMap const& lCompMap)
                        .sh_type      = SHT_STRTAB,
                        .sh_flags     = SHF_STRINGS,
                        .sh_addr      = 0x00U,
-                       .sh_offset    = lFileShOff + sizeof lSectionName,
+                       .sh_offset    = g_FileShOff + sizeof lSectionName,
                        .sh_size      = lTotFileSz + lTotLastAcc,
                        .sh_link      = SHN_UNDEF,
                        .sh_info      = 0x00U,
@@ -264,11 +284,13 @@ void crtElf(fs::path const& lFingerPrintFile, FPMap const& lCompMap)
                        .sh_entsize   = 0x00U},
             };
 
+        FileIO lFileIOStrm(lFingerPrintFile);
+
         // write elf header
-        lFileIOStrm.write(&lElfHdrWrite, sizeof lElfHdrWrite);
+        lFileIOStrm.write(&lElfHdr, sizeof lElfHdr);
 
         //write elf section headers
-        for(auto const &lRefSecHdr : lSecHdrWrite)
+        for(auto const &lRefSecHdr : lSecHdr)
         {
             lFileIOStrm.write(&lRefSecHdr, sizeof lRefSecHdr);
         }
@@ -287,12 +309,64 @@ void crtElf(fs::path const& lFingerPrintFile, FPMap const& lCompMap)
     }
 }
 
-auto compMTime(fs::path const& lDBPath, FPMap const& lCompMap) -> bool
+FPMap ReadElf(fs::path const& lFingerPrintFile)
 {
-    fs::path lFingerPrintFile = lDBPath / "fingerprint";
-    if (fs::exists(lFingerPrintFile))
+    FPMap lLastAccMap;
+    try
     {
-        FPMap lReadMap = ReadElf(lFingerPrintFile);
+        // Read
+        FileIO lFileIOStrm(lFingerPrintFile);
+
+        Elf64_Ehdr lElfHdr;
+        if(lFileIOStrm.chkSzRead(sizeof lElfHdr))
+            lFileIOStrm.read(&lElfHdr, sizeof lElfHdr);
+        else
+            throw std::runtime_error("Exceeded size of File while reading Hdr");
+
+        auto lSzOfShHdr = lElfHdr.e_shentsize;
+        auto lTotalSections = lElfHdr.e_shnum;
+
+        lFileIOStrm.seekOffRead(lSzOfShHdr * (lTotalSections - 1));
+
+        Elf64_Shdr lSecHdr;
+        lFileIOStrm.read(&lSecHdr, sizeof lSecHdr);
+
+        if(lSecHdr.sh_name > 1) // Not The NULL ShHdr or String Table
+        {
+            lFileIOStrm.seekAbsRead(lSecHdr.sh_offset);
+            std::unique_ptr<char[]> lBuffer = std::make_unique<char[]>(lSecHdr.sh_size);
+            lFileIOStrm.read(lBuffer.get(), lSecHdr.sh_size);
+
+            size_t lFileNameStrSz = 0;
+            while(lFileNameStrSz + sizeof(fs::file_time_type) <= lSecHdr.sh_size)
+            {
+                auto const lBufStrLen = sd::strlen(lBuffer.get() + lFileNameStrSz);
+
+                auto &lFileMTime = lLastAccMap[std::string(lBuffer.get() + lFileNameStrSz, lBufStrLen)];
+                lFileNameStrSz += lBufStrLen + 1;
+                std::memcpy(&lFileMTime, lBuffer.get() + lFileNameStrSz, sizeof(fs::file_time_type));
+
+                lFileNameStrSz += sizeof(fs::file_time_type);
+            }
+        }
+        else
+        {
+            UNREACHABLE("Improper offsets while reading from file or corrupt file");
+        }
+    }
+    catch(std::exception const& lExcuse)
+    {
+        std::cerr << lExcuse.what() << std::endl;
+    }
+
+    return lLastAccMap;
+}
+
+bool compMTime(fs::path const& lFPFile, FPMap const& lCompMap)
+{
+    if (fs::exists(lFPFile))
+    {
+        FPMap lReadMap = ReadElf(lFPFile);
 
         try
         {
@@ -308,32 +382,80 @@ auto compMTime(fs::path const& lDBPath, FPMap const& lCompMap) -> bool
         catch(std::exception const& lExcuse)
         {
             std::cerr << lExcuse.what() << std::endl;
-            crtElf(lFingerPrintFile, lCompMap);
+            crtElf(lFPFile, lCompMap);
             return true;
         }
     }
     else
     {
-        crtElf(lFingerPrintFile, lCompMap);
+        crtElf(lFPFile, lCompMap);
         return true;
     }
 
     return true;
 }
 
+fs::path getCurBinPath()
+{
+    struct stat sb;
+    if(lstat("/proc/self/exe", &sb) == -1)
+    {
+        UNREACHABLE("Couldn't lstat /proc/self/exe");
+    }
+
+    u64 lCurFilePathSz = 1 << 9;
+    i64 lRdLnkVal = 0;
+    std::unique_ptr<char[]> lCurFilePath = nullptr;
+
+    constexpr static u64 lMaxVal = u64::MAX / 100;
+
+    do
+    {
+        if (lCurFilePathSz > lMaxVal)
+        {
+            UNREACHABLE("Reached Max allocation depth");
+        }
+
+        lCurFilePathSz = lCurFilePathSz << 1;
+        lCurFilePath = std::make_unique<char[]>(lCurFilePathSz);
+
+        lRdLnkVal = readlink("/proc/self/exe", lCurFilePath.get(), lCurFilePathSz);
+        if (lRdLnkVal == -1) 
+        {
+            UNREACHABLE("readlink");
+        }
+    } while(lRdLnkVal == lCurFilePathSz);
+
+    lCurFilePath[lRdLnkVal] = '\0';
+    return fs::path(lCurFilePath.get(), lCurFilePath.get() + lRdLnkVal);
+}
+
 int main (int argc, char *argv[]) 
 {
-    std::printf("%s\n", argv[0]);
-    std::printf("%s\n", __FILE__);
+    SHIFT_ARGS(argc, argv);
+    fs::path lCurBinFile = getCurBinPath();
+    fs::path lCurBinPath = lCurBinFile.parent_path();
+    if (lCurBinPath.filename() != "build")
+    {
+        lCurBinPath /= "build";
+        auto lTmpBinFile = lCurBinPath / lCurBinFile.filename();
 
-    auto lDBPath = fs::path(fs::current_path() / "Build" / ".fingerprint");
-    if(!fs::exists(lDBPath))
-        fs::create_directories(lDBPath);
+        fs::create_directory(lCurBinPath);        
+
+        fs::rename(lCurBinFile, lTmpBinFile);
+        std::swap(lCurBinFile, lTmpBinFile);
+        fs::create_symlink(lCurBinFile, lTmpBinFile);
+    }
+
+    fs::path lSrcFilePath = lCurBinPath.parent_path();
+    fs::path lSrcFile = lSrcFilePath / __FILE_NAME__;
+
+    auto lFPFile = fs::path(lCurBinPath / ".fingerprint");
 
     FPMap lTmpFPMap;
-    lTmpFPMap[__FILE__] = fs::last_write_time(__FILE__);
-    lTmpFPMap[argv[0]] = fs::last_write_time(argv[0]);
+    lTmpFPMap[lSrcFile.string()] = fs::last_write_time(lSrcFile);
+    lTmpFPMap[lCurBinFile.string()] = fs::last_write_time(lCurBinFile);
 
-    std::cout << std::boolalpha << "rebuild needed: " << compMTime(lDBPath, lTmpFPMap) << std::endl;
+    std::cout << std::boolalpha << "rebuild needed: " << compMTime(lFPFile, lTmpFPMap) << std::endl;
     return 0;
 }
