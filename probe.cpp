@@ -1,16 +1,28 @@
-#include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <elf.h>
 #include <fstream>
-#include <ios>
 #include <iostream>
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <newTypes.hpp>
 #include <sys/stat.h>
-#include <unistd.h>
+
+#include <boost/preprocessor/seq/for_each_i.hpp>
+#include <boost/preprocessor/variadic/to_seq.hpp>
+
+// Macro to generate each enum value with an index
+#define FOR_EACH(_1, _2, i, x) x = (1 << i),
+
+// Main macro to generate the enum definition
+#define MACRO(...) BOOST_PP_SEQ_FOR_EACH_I(FOR_EACH, _, BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__))
+
+#define GEN_ENUM(eName, x...)                                                  \
+    enum eName : uint32_t                                                      \
+    {                                                                          \
+        MACRO(x)                                                               \
+    }
+GEN_ENUM(FileUpdateFlags, Ehdr, Shdr, Content);
 
 namespace fs = std::filesystem;
 
@@ -23,7 +35,7 @@ static constexpr const Elf64_Half g_TotalSections = 3;
 static constexpr const Elf64_Off g_FileShOff = sizeof(Elf64_Ehdr) + (sizeof(Elf64_Shdr) * g_TotalSections);
 
 template <typename TP>
-auto to_sys_clock(TP tp)
+constexpr auto to_sys_clock(TP tp)
 {
     using namespace std::chrono;
     return time_point_cast<system_clock::duration>(tp - TP::clock::now()
@@ -31,7 +43,7 @@ auto to_sys_clock(TP tp)
 }
 
 template <typename TP>
-std::time_t to_time_t(TP tp)
+constexpr std::time_t to_time_t(TP tp)
 {
     using namespace std::chrono;
     auto sctp = to_sys_clock(tp);
@@ -252,7 +264,7 @@ void crtElf(fs::path const& lFingerPrintFile, FPMap const& lCompMap)
         // Write
         Elf64_Ehdr lElfHdr = crtElfHdr(g_TotalSections);
 
-        const char lSectionName[] = "\0.String.Table\0.Siddharth.Header";
+        const char lSectionName[] = "\0.String.Table\0.mTime.Header";
         Elf64_Xword lTotFileSz = 0u, lTotLastAcc = 0u;
         for(const auto &[lFile, lAccTime] : lCompMap)
         {
@@ -362,6 +374,22 @@ FPMap ReadElf(fs::path const& lFingerPrintFile)
     return lLastAccMap;
 }
 
+void updateElf(u32 const flags)
+{
+    if(flags & FileUpdateFlags::Ehdr)
+    {
+        std::cout << "ELF Header" << std::endl;
+    }
+    if(flags & FileUpdateFlags::Shdr)
+    {
+        std::cout << "ELF Section Header" << std::endl;
+    }
+    if(flags & FileUpdateFlags::Content)
+    {
+        std::cout << "ELF Content" << std::endl;
+    }
+}
+
 bool compMTime(fs::path const& lFPFile, FPMap const& lCompMap)
 {
     if (fs::exists(lFPFile))
@@ -422,7 +450,7 @@ fs::path getCurBinPath()
         lRdLnkVal = readlink("/proc/self/exe", lCurFilePath.get(), lCurFilePathSz);
         if (lRdLnkVal == -1) 
         {
-            UNREACHABLE("readlink");
+            UNREACHABLE("couldn't read /proc/self/exe");
         }
     } while(lRdLnkVal == lCurFilePathSz);
 
